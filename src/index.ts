@@ -1,4 +1,5 @@
 import express from 'express';
+import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import path from 'path';
 import dotenv from 'dotenv';
@@ -14,6 +15,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ---- Middleware ----
+app.use(cors());  // Allow cross-origin requests from your Hostinger website
 app.use(express.json());
 app.use(cookieParser());
 
