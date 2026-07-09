@@ -1,3 +1,4 @@
+import { logger } from '../utils/logger';
 import mysql from 'mysql2/promise';
 import dotenv from 'dotenv';
 
@@ -13,6 +14,7 @@ export class DBService {
    * The server keeps running even if this fails.
    */
   static async init(): Promise<mysql.Pool | null> {
+    let conn: mysql.PoolConnection | undefined;
     try {
       pool = mysql.createPool({
         host: process.env.DB_HOST || 'localhost',
@@ -26,10 +28,10 @@ export class DBService {
       });
 
       // Test the connection
-      const connection = await pool.getConnection();
+      conn = await pool.getConnection();
 
       // Create chat history table
-      await connection.query(`
+      await conn.query(`
         CREATE TABLE IF NOT EXISTS chat_history (
           id INT AUTO_INCREMENT PRIMARY KEY,
           user_id VARCHAR(255) NOT NULL,
@@ -37,18 +39,30 @@ export class DBService {
           role VARCHAR(50) NOT NULL,
           content TEXT NOT NULL,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          INDEX idx_user_platform (user_id, platform)
+          INDEX idx_user_platform_created (user_id, platform, created_at)
         )
       `);
 
-      connection.release();
+      // Migration: Add the composite index if it doesn't exist
+      try {
+        const [indexes]: any = await conn.query("SHOW INDEX FROM chat_history WHERE Key_name = 'idx_user_platform_created'");
+        if (indexes.length === 0) {
+          await conn.query('ALTER TABLE chat_history ADD INDEX idx_user_platform_created (user_id, platform, created_at)');
+          logger.info('Applied database index migration: idx_user_platform_created');
+        }
+      } catch (error: any) {
+        logger.warn(`Migration check failed: ${error.message}`);
+      }
+
       isConnected = true;
       return pool;
     } catch (error: any) {
-      console.error('❌ Database connection failed:', error.message);
+      logger.error('❌ Database connection failed:', error.message);
       pool = null;
       isConnected = false;
       return null;
+    } finally {
+      conn?.release();
     }
   }
 
@@ -57,12 +71,14 @@ export class DBService {
    */
   static async testConnection(): Promise<boolean> {
     if (!pool) return false;
+    let conn: mysql.PoolConnection | undefined;
     try {
-      const conn = await pool.getConnection();
-      conn.release();
+      conn = await pool.getConnection();
       return true;
     } catch {
       return false;
+    } finally {
+      conn?.release();
     }
   }
 
@@ -78,7 +94,7 @@ export class DBService {
         [userId, 'whatsapp', role, content]
       );
     } catch (error: any) {
-      console.error('DB save error:', error.message);
+      logger.error('DB save error:', error.message);
     }
   }
 
@@ -98,7 +114,7 @@ export class DBService {
         parts: [{ text: row.content }]
       }));
     } catch (error: any) {
-      console.error('DB history fetch error:', error.message);
+      logger.error('DB history fetch error:', error.message);
       return [];
     }
   }
@@ -111,12 +127,16 @@ export class DBService {
     try {
       const [rows] = await pool.query<mysql.RowDataPacket[]>(`
         SELECT 
-          user_id,
-          (SELECT content FROM chat_history c2 WHERE c2.user_id = c1.user_id ORDER BY created_at DESC LIMIT 1) as last_message,
-          MAX(created_at) as last_time,
-          COUNT(*) as message_count
+          c1.user_id,
+          c1.content as last_message,
+          c1.created_at as last_time,
+          counts.message_count
         FROM chat_history c1
-        GROUP BY user_id
+        INNER JOIN (
+            SELECT user_id, MAX(created_at) as max_time, COUNT(*) as message_count
+            FROM chat_history
+            GROUP BY user_id
+        ) counts ON c1.user_id = counts.user_id AND c1.created_at = counts.max_time
         ORDER BY last_time DESC
       `);
       return rows.map(row => ({
@@ -126,7 +146,7 @@ export class DBService {
         messageCount: row.message_count,
       }));
     } catch (error: any) {
-      console.error('DB conversations fetch error:', error.message);
+      logger.error('DB conversations fetch error:', error.message);
       return [];
     }
   }

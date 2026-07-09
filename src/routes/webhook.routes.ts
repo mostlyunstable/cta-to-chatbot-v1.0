@@ -1,4 +1,9 @@
+/// <reference path="../types/express.d.ts" />
 import { Router, Request, Response } from 'express';
+import crypto from 'crypto';
+import { z } from 'zod';
+import { rateLimit } from 'express-rate-limit';
+import { logger } from '../utils/logger';
 import { MetaService } from '../services/meta.service';
 import { AIService } from '../services/ai.service';
 import { ConfigService } from '../services/config.service';
@@ -8,18 +13,18 @@ const router = Router();
 // ============================================================
 // WhatsApp Webhook — Verification (GET)
 // ============================================================
-router.get('/whatsapp', (req: Request, res: Response) => {
+router.get('/whatsapp', async (req: Request, res: Response) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  const verifyToken = ConfigService.get('META_VERIFY_TOKEN');
+  const verifyToken = await ConfigService.get('META_VERIFY_TOKEN');
 
   if (mode === 'subscribe' && token === verifyToken) {
-    console.log('✅ WhatsApp webhook verified successfully');
+    logger.info('WhatsApp webhook verified successfully');
     res.status(200).send(challenge);
   } else {
-    console.warn('❌ WhatsApp webhook verification failed — token mismatch');
+    logger.warn('WhatsApp webhook verification failed — token mismatch');
     res.sendStatus(403);
   }
 });
@@ -28,6 +33,30 @@ router.get('/whatsapp', (req: Request, res: Response) => {
 // WhatsApp Webhook — Incoming Messages (POST)
 // ============================================================
 router.post('/whatsapp', async (req: Request, res: Response) => {
+  // ---- SECURITY: VERIFY META WEBHOOK SIGNATURE ----
+  const signature = req.headers['x-hub-signature-256'] as string;
+  const appSecret = await ConfigService.get('META_APP_SECRET');
+  
+  if (appSecret && appSecret !== 'your_meta_app_secret') {
+    if (!signature) {
+      logger.warn('Meta webhook missing signature. Rejecting.');
+      res.status(401).send('Missing signature');
+      return;
+    }
+    const rawBody = (req as any).rawBody;
+    if (rawBody) {
+      const hmac = crypto.createHmac('sha256', appSecret);
+      const digest = 'sha256=' + hmac.update(rawBody).digest('hex');
+      if (signature !== digest) {
+        logger.warn('Meta webhook signature mismatch. Rejecting.');
+        res.status(401).send('Invalid signature');
+        return;
+      }
+    }
+  } else {
+    logger.warn('META_APP_SECRET not configured. Skipping webhook signature validation.');
+  }
+
   const body = req.body;
 
   // Always respond 200 immediately so Meta doesn't retry
@@ -36,8 +65,8 @@ router.post('/whatsapp', async (req: Request, res: Response) => {
   if (body.object !== 'whatsapp_business_account') return;
 
   // ---- CHECK IF BOT IS ACTIVE ----
-  if (!ConfigService.isBotActive()) {
-    console.log('⏸️  Bot is deactivated — ignoring incoming message');
+  if (!(await ConfigService.isBotActive())) {
+    logger.info('Bot is deactivated — ignoring incoming message');
     return;
   }
 
@@ -53,11 +82,15 @@ router.post('/whatsapp', async (req: Request, res: Response) => {
       const from = message.from;
 
       if (message.type === 'text' && message.text?.body) {
-        const userText = message.text.body;
-        console.log(`📩 WhatsApp from ${from}: "${userText}"`);
+        let userText = message.text.body;
+        if (userText.length > 2000) {
+          logger.warn(`Truncating oversized message from ${from}`);
+          userText = userText.substring(0, 2000);
+        }
+        logger.info(`WhatsApp from ${from}: "${userText}"`);
 
         const aiReply = await AIService.generateReply(from, userText);
-        console.log(`🤖 AI reply to ${from}: "${aiReply}"`);
+        logger.info(`AI reply to ${from}: "${aiReply}"`);
 
         await MetaService.sendWhatsAppMessage(from, aiReply);
       }
@@ -67,10 +100,10 @@ router.post('/whatsapp', async (req: Request, res: Response) => {
     const statuses = value?.statuses;
     if (statuses && statuses.length > 0) {
       const status = statuses[0];
-      console.log(`📊 Message to ${status.recipient_id}: ${status.status}`);
+      logger.info(`Message to ${status.recipient_id}: ${status.status}`);
     }
   } catch (error: any) {
-    console.error('❌ Error processing WhatsApp webhook:', error.message);
+    logger.error(`Error processing WhatsApp webhook: ${error.message}`);
   }
 });
 
@@ -100,30 +133,53 @@ function normalizePhone(raw: string): string {
   return digits;
 }
 
-router.post('/contact-form', async (req: Request, res: Response) => {
-  const { name, phone, message } = req.body;
+const contactLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20, // 20 requests per 15 minutes
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests, please try again later' }
+});
 
-  console.log(`📋 Contact form received — Name: "${name}", Phone: "${phone}", Message: "${message}"`);
+const contactFormSchema = z.object({
+  name: z.string().optional(),
+  phone: z.string().min(1, 'Phone number is required'),
+  message: z.string().optional(),
+});
 
-  if (!phone) {
-    console.log('❌ Contact form rejected — no phone number');
-    res.status(400).json({ error: 'Phone number is required' });
+router.post('/contact-form', contactLimiter, async (req: Request, res: Response) => {
+  const authHeader = req.headers.authorization;
+  const expectedSecret = process.env.WEBHOOK_SECRET || await ConfigService.get('META_VERIFY_TOKEN');
+  
+  if (!authHeader || authHeader !== `Bearer ${expectedSecret}`) {
+    res.status(401).json({ error: 'Unauthorized' });
     return;
   }
 
+  const parsed = contactFormSchema.safeParse(req.body);
+  if (!parsed.success) {
+    logger.warn('Contact form rejected — invalid payload');
+    res.status(400).json({ error: parsed.error.format() });
+    return;
+  }
+
+  const { name, phone, message } = parsed.data;
+
+  logger.info(`Contact form received — Name: "${name}", Phone: "${phone}", Message: "${message}"`);
+
   // CHECK IF BOT IS ACTIVE
-  if (!ConfigService.isBotActive()) {
-    console.log('⏸️  Bot is deactivated — ignoring contact form trigger');
+  if (!(await ConfigService.isBotActive())) {
+    logger.info('Bot is deactivated — ignoring contact form trigger');
     res.status(200).json({ success: false, message: 'Bot is currently deactivated' });
     return;
   }
 
   // Normalize phone to WhatsApp format
   const normalizedPhone = normalizePhone(phone);
-  console.log(`📱 Normalized phone: "${phone}" → "${normalizedPhone}"`);
+  logger.info(`Normalized phone: "${phone}" → "${normalizedPhone}"`);
 
   if (normalizedPhone.length < 10) {
-    console.log(`❌ Phone number too short after normalization: "${normalizedPhone}"`);
+    logger.warn(`Phone number too short after normalization: "${normalizedPhone}"`);
     res.status(400).json({ error: 'Invalid phone number' });
     return;
   }
@@ -132,20 +188,12 @@ router.post('/contact-form', async (req: Request, res: Response) => {
   res.status(200).json({ success: true, message: 'Automation triggered' });
 
   try {
-    const welcomeMsg = `Hey ${name || 'there'}, thanks for reaching out to Global Peace Overseas! 🌍\nWe'll get back to you shortly.`;
-    console.log(`📤 Sending welcome message to ${normalizedPhone}...`);
-    const sent = await MetaService.sendWhatsAppMessage(normalizedPhone, welcomeMsg);
-    console.log(`📤 Welcome message ${sent ? 'SENT ✅' : 'FAILED ❌'}`);
-
-    if (message && message.trim()) {
-      console.log(`🤖 Generating AI reply for message: "${message}"`);
-      const aiReply = await AIService.generateReply(normalizedPhone, message);
-      console.log(`🤖 AI reply: "${aiReply}"`);
-      const aiSent = await MetaService.sendWhatsAppMessage(normalizedPhone, aiReply);
-      console.log(`📤 AI reply ${aiSent ? 'SENT ✅' : 'FAILED ❌'}`);
-    }
+    const fixedMsg = "Thank you for contacting us! We have received your inquiry. Our team will get back to you shortly.";
+    logger.info(`Sending fixed message to ${normalizedPhone}...`);
+    const sent = await MetaService.sendWhatsAppMessage(normalizedPhone, fixedMsg);
+    logger.info(`Fixed message ${sent ? 'SENT' : 'FAILED'}`);
   } catch (error: any) {
-    console.error('❌ Error processing contact form:', error.message);
+    logger.error(`Error processing contact form: ${error.message}`);
   }
 });
 

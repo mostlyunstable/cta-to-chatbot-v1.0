@@ -1,9 +1,12 @@
+/// <reference path="../types/express.d.ts" />
 import { Router, Request, Response } from 'express';
 import { requireAuth } from '../middleware/auth.middleware';
 import { AuthService } from '../services/auth.service';
 import { ConfigService } from '../services/config.service';
 import { DBService } from '../services/db.service';
 import dotenv from 'dotenv';
+import { rateLimit } from 'express-rate-limit';
+import { logger } from '../utils/logger';
 
 dotenv.config();
 
@@ -13,19 +16,27 @@ const router = Router();
 // Public: Login / Logout
 // ============================================================
 
-router.post('/login', async (req: Request, res: Response) => {
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // Limit each IP to 5 login requests per windowMs
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many login attempts, please try again after 15 minutes' }
+});
+
+router.post('/login', loginLimiter, async (req: Request, res: Response) => {
   const { username, password } = req.body;
-  console.log(`[DEBUG] Login attempt - Username: "${username}", Password: "${password}"`);
+  logger.info(`Login attempt - Username: "${username}"`);
 
   if (!username || !password) {
-    console.log('[DEBUG] Missing username or password');
+    logger.warn('Missing username or password');
     res.status(400).json({ error: 'Username and password are required' });
     return;
   }
 
   const result = await AuthService.login(username, password);
   if (!result.token) {
-    console.log('[DEBUG] AuthService.login failed:', result.error);
+    logger.warn(`AuthService.login failed: ${result.error}`);
     const status = result.error?.includes('Database') ? 500 : 401;
     res.status(status).json({ error: result.error || 'Invalid username or password' });
     return;
@@ -55,9 +66,9 @@ router.post('/logout', (_req: Request, res: Response) => {
 // --- Status Dashboard ---
 router.get('/status', requireAuth, async (_req: Request, res: Response) => {
   const dbOk = await DBService.testConnection();
-  const geminiKey = ConfigService.get('GEMINI_API_KEY');
-  const waToken = ConfigService.get('WHATSAPP_ACCESS_TOKEN');
-  const botActive = ConfigService.isBotActive();
+  const geminiKey = await ConfigService.get('GEMINI_API_KEY');
+  const waToken = await ConfigService.get('WHATSAPP_ACCESS_TOKEN');
+  const botActive = await ConfigService.isBotActive();
 
   res.json({
     botActive,
@@ -75,7 +86,7 @@ router.post('/toggle', requireAuth, async (req: Request, res: Response) => {
 
   const ok = await ConfigService.set('BOT_ACTIVE', newState);
   if (ok) {
-    console.log(`🔄 Bot ${newState === 'true' ? 'ACTIVATED' : 'DEACTIVATED'} by admin`);
+    logger.info(`Bot ${newState === 'true' ? 'ACTIVATED' : 'DEACTIVATED'} by admin`);
     res.json({ success: true, botActive: newState === 'true' });
   } else {
     res.status(500).json({ error: 'Failed to update bot state. Is the database connected?' });
@@ -83,8 +94,8 @@ router.post('/toggle', requireAuth, async (req: Request, res: Response) => {
 });
 
 // --- Get Config ---
-router.get('/config', requireAuth, (_req: Request, res: Response) => {
-  const config = ConfigService.getAllRaw();
+router.get('/config', requireAuth, async (_req: Request, res: Response) => {
+  const config = await ConfigService.getAllRaw();
   res.json({ success: true, config });
 });
 
@@ -101,6 +112,7 @@ router.put('/config', requireAuth, async (req: Request, res: Response) => {
     'WHATSAPP_ACCESS_TOKEN',
     'WHATSAPP_PHONE_NUMBER_ID',
     'META_VERIFY_TOKEN',
+    'META_APP_SECRET',
     'GEMINI_API_KEY',
     'SYSTEM_PROMPT',
   ];
@@ -112,7 +124,7 @@ router.put('/config', requireAuth, async (req: Request, res: Response) => {
     }
   }
 
-  console.log('⚙️  Config updated by admin:', Object.keys(results).join(', '));
+  logger.info(`Config updated by admin: ${Object.keys(results).join(', ')}`);
   res.json({ success: true, updated: results });
 });
 
@@ -132,7 +144,12 @@ router.get('/chats/:userId', requireAuth, async (req: Request, res: Response) =>
 // --- Change Password ---
 router.put('/change-password', requireAuth, async (req: Request, res: Response) => {
   const { currentPassword, newPassword } = req.body;
-  const adminUser = (req as any).adminUser;
+  const adminUser = req.adminUser;
+
+  if (!adminUser) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
 
   if (!currentPassword || !newPassword) {
     res.status(400).json({ error: 'Both currentPassword and newPassword are required' });

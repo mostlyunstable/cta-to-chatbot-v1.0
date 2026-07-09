@@ -1,3 +1,4 @@
+/// <reference path="../types/express.d.ts" />
 import { Request, Response, NextFunction } from 'express';
 import { AuthService } from '../services/auth.service';
 
@@ -7,7 +8,7 @@ import { AuthService } from '../services/auth.service';
  *   1. The `token` cookie (set by login page)
  *   2. The `Authorization: Bearer <token>` header
  */
-export function requireAuth(req: Request, res: Response, next: NextFunction): void {
+export async function requireAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
   // Try cookie first, then Authorization header
   const token = req.cookies?.token || extractBearerToken(req);
 
@@ -16,14 +17,14 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
     return;
   }
 
-  const user = AuthService.verifyToken(token);
+  const user = await AuthService.verifyTokenAndUser(token);
   if (!user) {
     res.status(401).json({ error: 'Invalid or expired session. Please log in again.' });
     return;
   }
 
   // Attach user info to request for downstream use
-  (req as any).adminUser = user;
+  req.adminUser = user;
   next();
 }
 

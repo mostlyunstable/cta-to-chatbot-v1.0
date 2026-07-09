@@ -1,3 +1,4 @@
+import { logger } from '../utils/logger';
 import mysql from 'mysql2/promise';
 import dotenv from 'dotenv';
 
@@ -6,14 +7,12 @@ dotenv.config();
 let pool: mysql.Pool | null = null;
 let isConnected = false;
 
-// In-memory cache of config values for fast access
-const configCache: Map<string, string> = new Map();
-
 // Keys that the config service manages
 const CONFIG_KEYS = [
   'WHATSAPP_ACCESS_TOKEN',
   'WHATSAPP_PHONE_NUMBER_ID',
   'META_VERIFY_TOKEN',
+  'META_APP_SECRET',
   'GEMINI_API_KEY',
   'SYSTEM_PROMPT',
   'BOT_ACTIVE',
@@ -31,8 +30,9 @@ export class ConfigService {
    */
   static async init(dbPool: mysql.Pool): Promise<boolean> {
     pool = dbPool;
+    let conn: mysql.PoolConnection | undefined;
     try {
-      const conn = await pool.getConnection();
+      conn = await pool.getConnection();
 
       // Create config table
       await conn.query(`
@@ -43,19 +43,16 @@ export class ConfigService {
         )
       `);
 
-      conn.release();
-
       // Seed defaults from .env (only inserts if key doesn't already exist)
       await this.seedDefaults();
-
-      // Load all config into memory
-      await this.reloadCache();
 
       isConnected = true;
       return true;
     } catch (error: any) {
-      console.error('❌ ConfigService init failed:', error.message);
+      logger.error(`ConfigService init failed: ${error.message}`);
       return false;
+    } finally {
+      conn?.release();
     }
   }
 
@@ -70,6 +67,7 @@ export class ConfigService {
     const placeholders = [
       'your_whatsapp_access_token',
       'your_whatsapp_phone_number_id',
+      'your_meta_app_secret',
       'your_gemini_api_key',
     ];
 
@@ -77,6 +75,7 @@ export class ConfigService {
       WHATSAPP_ACCESS_TOKEN: process.env.WHATSAPP_ACCESS_TOKEN || 'your_whatsapp_access_token',
       WHATSAPP_PHONE_NUMBER_ID: process.env.WHATSAPP_PHONE_NUMBER_ID || 'your_whatsapp_phone_number_id',
       META_VERIFY_TOKEN: process.env.META_VERIFY_TOKEN || 'my_secret_token_123',
+      META_APP_SECRET: process.env.META_APP_SECRET || 'your_meta_app_secret',
       GEMINI_API_KEY: process.env.GEMINI_API_KEY || 'your_gemini_api_key',
       SYSTEM_PROMPT: DEFAULT_SYSTEM_PROMPT,
       BOT_ACTIVE: 'true',
@@ -103,39 +102,28 @@ export class ConfigService {
   }
 
   /**
-   * Reload the in-memory cache from the database.
+   * Get a config value. Reads directly from the database to support horizontal scaling.
+   * Falls back to .env if DB is not connected or value is missing.
    */
-  static async reloadCache(): Promise<void> {
-    if (!pool) return;
-    try {
-      const [rows] = await pool.query<mysql.RowDataPacket[]>(
-        'SELECT config_key, config_value FROM bot_config'
-      );
-      configCache.clear();
-      for (const row of rows) {
-        configCache.set(row.config_key, row.config_value);
+  static async get(key: string): Promise<string> {
+    if (pool && isConnected) {
+      try {
+        const [rows] = await pool.query<mysql.RowDataPacket[]>(
+          'SELECT config_value FROM bot_config WHERE config_key = ?',
+          [key]
+        );
+        if (rows.length > 0) {
+          return rows[0].config_value;
+        }
+      } catch (error: any) {
+        logger.error(`Error fetching config ${key} from DB: ${error.message}`);
       }
-    } catch (error: any) {
-      console.error('Config cache reload error:', error.message);
     }
-  }
-
-  /**
-   * Get a config value. Reads from in-memory cache (fast).
-   * Falls back to .env if DB is not connected.
-   */
-  static get(key: string): string {
-    // Try cache first
-    const cached = configCache.get(key);
-    if (cached !== undefined) return cached;
 
     // Fallback to .env
     return process.env[key] || '';
   }
 
-  /**
-   * Update a config value in the database AND the in-memory cache.
-   */
   static async set(key: string, value: string): Promise<boolean> {
     if (!pool || !isConnected) return false;
     try {
@@ -143,10 +131,9 @@ export class ConfigService {
         'INSERT INTO bot_config (config_key, config_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE config_value = ?',
         [key, value, value]
       );
-      configCache.set(key, value);
       return true;
     } catch (error: any) {
-      console.error('Config set error:', error.message);
+      logger.error(`Config set error: ${error.message}`);
       return false;
     }
   }
@@ -154,10 +141,10 @@ export class ConfigService {
   /**
    * Get all config values (for admin panel). Masks sensitive tokens.
    */
-  static getAll(): Record<string, string> {
+  static async getAll(): Promise<Record<string, string>> {
     const result: Record<string, string> = {};
     for (const key of CONFIG_KEYS) {
-      result[key] = this.get(key);
+      result[key] = await this.get(key);
     }
     return result;
   }
@@ -165,10 +152,10 @@ export class ConfigService {
   /**
    * Get all config values unmasked (for admin panel internal use).
    */
-  static getAllRaw(): Record<string, string> {
+  static async getAllRaw(): Promise<Record<string, string>> {
     const result: Record<string, string> = {};
     for (const key of CONFIG_KEYS) {
-      result[key] = this.get(key);
+      result[key] = await this.get(key);
     }
     return result;
   }
@@ -176,8 +163,9 @@ export class ConfigService {
   /**
    * Check if the bot is currently active.
    */
-  static isBotActive(): boolean {
-    return this.get('BOT_ACTIVE') === 'true';
+  static async isBotActive(): Promise<boolean> {
+    const val = await this.get('BOT_ACTIVE');
+    return val === 'true';
   }
 
   /**

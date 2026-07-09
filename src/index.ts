@@ -1,13 +1,18 @@
+/// <reference path="./types/express.d.ts" />
 import express from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import path from 'path';
 import dotenv from 'dotenv';
+import helmet from 'helmet';
+import { rateLimit } from 'express-rate-limit';
+import { logger } from './utils/logger';
 import { DBService } from './services/db.service';
 import { ConfigService } from './services/config.service';
 import { AuthService } from './services/auth.service';
 import webhookRoutes from './routes/webhook.routes';
 import adminRoutes from './routes/admin.routes';
+import { NextFunction, Request, Response } from 'express';
 
 dotenv.config();
 
@@ -15,9 +20,22 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ---- Middleware ----
+app.use(helmet());
 app.use(cors());  // Allow cross-origin requests from your Hostinger website
-app.use(express.json());
+app.use(express.json({
+  verify: (req: any, _res, buf) => {
+    req.rawBody = buf;
+  }
+}));
 app.use(cookieParser());
+
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 1000, // Limit each IP to 1000 requests per window
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use(globalLimiter);
 
 // ---- Serve Admin Panel (static HTML files) ----
 app.use(express.static(path.join(__dirname, '..', 'public')));
@@ -36,37 +54,50 @@ app.get('/', (_req, res) => {
 app.use('/api/webhooks', webhookRoutes);
 app.use('/api/admin', adminRoutes);
 
-// ---- Start Server ----
-app.listen(PORT, async () => {
-  console.log('');
-  console.log('╔══════════════════════════════════════════════╗');
-  console.log('║   🤖 WhatsApp AI Chatbot — Server Started   ║');
-  console.log('╠══════════════════════════════════════════════╣');
-  console.log(`║   URL:    http://localhost:${PORT}              ║`);
-  console.log(`║   Admin:  http://localhost:${PORT}/login.html   ║`);
-  console.log(`║   Ping:   http://localhost:${PORT}/ping         ║`);
-  console.log('╚══════════════════════════════════════════════╝');
-  console.log('');
-
-  // Initialize database
+// ---- Initialize and Start Server ----
+async function startServer() {
+  logger.info('Initializing database...');
   const dbPool = await DBService.init();
 
-  if (dbPool) {
-    console.log('✅ Database connected');
-
-    // Initialize config and auth services
-    const configOk = await ConfigService.init(dbPool);
-    const authOk = await AuthService.init(dbPool);
-
-    if (configOk) console.log('✅ Config service ready');
-    if (authOk) console.log('✅ Auth service ready');
-
-    console.log('');
-    console.log('🎉 All systems operational. Admin panel is ready.');
-  } else {
-    console.log('⚠️  Database not reachable — server running in limited mode.');
-    console.log('   → Admin panel login will not work until DB is connected.');
-    console.log('   → Fix DB_HOST in .env and enable Remote MySQL in Hostinger.');
+  if (!dbPool) {
+    logger.error('CRITICAL ERROR: Database initialization failed.');
+    process.exit(1);
   }
-  console.log('');
+  logger.info('Database connected');
+
+  const configOk = await ConfigService.init(dbPool);
+  const authOk = await AuthService.init(dbPool);
+
+  if (!configOk || !authOk) {
+    logger.error('CRITICAL ERROR: Config or Auth service initialization failed.');
+    process.exit(1);
+  }
+  
+  logger.info('Config service ready');
+  logger.info('Auth service ready');
+
+  // ---- Global Error Handler ----
+  app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
+    logger.error(`Unhandled error in route ${req.method} ${req.originalUrl}:`, err);
+    res.status(500).json({ success: false, error: 'Internal Server Error' });
+  });
+
+  app.listen(PORT, () => {
+    logger.info('');
+    logger.info('╔══════════════════════════════════════════════╗');
+    logger.info('║   🤖 WhatsApp AI Chatbot — Server Started   ║');
+    logger.info('╠══════════════════════════════════════════════╣');
+    logger.info(`║   URL:    http://localhost:${PORT}              ║`);
+    logger.info(`║   Admin:  http://localhost:${PORT}/login.html   ║`);
+    logger.info(`║   Ping:   http://localhost:${PORT}/ping         ║`);
+    logger.info('╚══════════════════════════════════════════════╝');
+    logger.info('');
+    logger.info('🎉 All systems operational. Admin panel is ready.');
+    logger.info('');
+  });
+}
+
+startServer().catch(err => {
+  logger.error('Fatal startup error:', err);
+  process.exit(1);
 });

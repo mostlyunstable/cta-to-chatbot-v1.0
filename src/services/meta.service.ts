@@ -1,3 +1,4 @@
+import { logger } from '../utils/logger';
 import axios from 'axios';
 import { ConfigService } from './config.service';
 
@@ -7,15 +8,15 @@ export class MetaService {
    * Reads credentials from ConfigService (live-updatable from admin panel).
    */
   static async sendWhatsAppMessage(to: string, message: string): Promise<boolean> {
-    const accessToken = ConfigService.get('WHATSAPP_ACCESS_TOKEN');
-    const phoneNumberId = ConfigService.get('WHATSAPP_PHONE_NUMBER_ID');
+    const accessToken = await ConfigService.get('WHATSAPP_ACCESS_TOKEN');
+    const phoneNumberId = await ConfigService.get('WHATSAPP_PHONE_NUMBER_ID');
 
     if (!accessToken || accessToken === 'your_whatsapp_access_token') {
-      console.error('⚠️  WhatsApp Access Token not configured');
+      logger.error('⚠️  WhatsApp Access Token not configured');
       return false;
     }
     if (!phoneNumberId || phoneNumberId === 'your_whatsapp_phone_number_id') {
-      console.error('⚠️  WhatsApp Phone Number ID not configured');
+      logger.error('⚠️  WhatsApp Phone Number ID not configured');
       return false;
     }
 
@@ -34,10 +35,10 @@ export class MetaService {
         },
       });
 
-      console.log(`✅ WhatsApp message sent to ${to}`);
+      logger.info(`✅ WhatsApp message sent to ${to}`);
       return true;
     } catch (error: any) {
-      console.error('❌ WhatsApp send failed:', error.response?.data || error.message);
+      logger.error('❌ WhatsApp send failed:', error.response?.data || error.message);
       return false;
     }
   }

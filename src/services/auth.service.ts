@@ -1,3 +1,4 @@
+import { logger } from '../utils/logger';
 import mysql from 'mysql2/promise';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
@@ -7,8 +8,11 @@ dotenv.config();
 
 let pool: mysql.Pool | null = null;
 
-// JWT secret — generated once per server instance if not in .env
-const JWT_SECRET = process.env.JWT_SECRET || 'chatbot_admin_jwt_secret_' + Date.now();
+const JWT_SECRET = process.env.JWT_SECRET as string;
+if (!JWT_SECRET) {
+  logger.error('❌ CRITICAL ERROR: JWT_SECRET environment variable is missing.');
+  process.exit(1);
+}
 const JWT_EXPIRY = '24h';
 
 export class AuthService {
@@ -17,8 +21,9 @@ export class AuthService {
    */
   static async init(dbPool: mysql.Pool): Promise<boolean> {
     pool = dbPool;
+    let conn: mysql.PoolConnection | undefined;
     try {
-      const conn = await pool.getConnection();
+      conn = await pool.getConnection();
 
       await conn.query(`
         CREATE TABLE IF NOT EXISTS admin_users (
@@ -46,21 +51,22 @@ export class AuthService {
           'INSERT INTO admin_users (username, password_hash) VALUES (?, ?)',
           [adminUsername, hash]
         );
-        console.log(`👤 Admin account created (username: "${adminUsername}")`);
+        logger.info(`👤 Admin account created (username: "${adminUsername}")`);
       } else {
         // Update its password just in case it was changed in .env
         await conn.query(
           'UPDATE admin_users SET password_hash = ? WHERE username = ?',
           [hash, adminUsername]
         );
-        console.log(`👤 Admin account updated/verified (username: "${adminUsername}")`);
+        logger.info(`👤 Admin account updated/verified (username: "${adminUsername}")`);
       }
 
-      conn.release();
       return true;
     } catch (error: any) {
-      console.error('❌ AuthService init failed:', error.message);
+      logger.error('❌ AuthService init failed:', error.message);
       return false;
+    } finally {
+      conn?.release();
     }
   }
 
@@ -69,7 +75,7 @@ export class AuthService {
    */
   static async login(username: string, password: string): Promise<{ token: string | null; error?: string }> {
     if (!pool) {
-      console.log('[DEBUG] AuthService.login failed: pool is null');
+      logger.info('[DEBUG] AuthService.login failed: pool is null');
       return { token: null, error: 'Database connection is not initialized. Please verify DB credentials in environment variables.' };
     }
     try {
@@ -79,42 +85,56 @@ export class AuthService {
       );
 
       if (rows.length === 0) {
-        console.log('[DEBUG] AuthService.login failed: User not found in DB');
+        logger.info('[DEBUG] AuthService.login failed: User not found in DB');
         return { token: null, error: 'Invalid username or password' };
       }
 
       const user = rows[0];
       const isMatch = await bcrypt.compare(password, user.password_hash);
       
-      console.log(`[DEBUG] AuthService.login: comparing provided password with hash: ${isMatch}`);
+      logger.info(`[DEBUG] AuthService.login: comparing provided password with hash: ${isMatch}`);
 
       if (!isMatch) {
-        console.log('[DEBUG] AuthService.login failed: Password mismatch');
+        logger.info('[DEBUG] AuthService.login failed: Password mismatch');
         return { token: null, error: 'Invalid username or password' };
       }
 
       // Generate JWT
       const token = jwt.sign(
-        { id: user.id, username: user.username },
+        { id: user.id, username: user.username, hash: user.password_hash.substring(0, 10) },
         JWT_SECRET,
         { expiresIn: JWT_EXPIRY }
       );
 
-      console.log('[DEBUG] AuthService.login succeeded');
+      logger.info('[DEBUG] AuthService.login succeeded');
       return { token };
     } catch (error: any) {
-      console.error('[DEBUG] AuthService.login error:', error.message);
+      logger.error('[DEBUG] AuthService.login error:', error.message);
       return { token: null, error: `Database error: ${error.message}` };
     }
   }
 
   /**
-   * Verify a JWT token. Returns the decoded payload or null.
+   * Verify a JWT token and ensure the user's password hasn't changed.
    */
-  static verifyToken(token: string): { id: number; username: string } | null {
+  static async verifyTokenAndUser(token: string): Promise<{ id: number; username: string } | null> {
     try {
-      const decoded = jwt.verify(token, JWT_SECRET) as { id: number; username: string };
-      return decoded;
+      const decoded = jwt.verify(token, JWT_SECRET) as { id: number; username: string; hash?: string };
+      if (!decoded.id) return null;
+
+      if (!pool) return null;
+      const [rows] = await pool.query<mysql.RowDataPacket[]>(
+        'SELECT password_hash FROM admin_users WHERE id = ?',
+        [decoded.id]
+      );
+      if (rows.length === 0) return null;
+
+      if (decoded.hash) {
+        const currentHash = rows[0].password_hash.substring(0, 10);
+        if (currentHash !== decoded.hash) return null; // Password was changed
+      }
+
+      return { id: decoded.id, username: decoded.username };
     } catch {
       return null;
     }
