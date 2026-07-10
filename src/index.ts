@@ -55,33 +55,7 @@ app.use('/api/webhooks', webhookRoutes);
 app.use('/api/admin', adminRoutes);
 
 // ---- Initialize and Start Server ----
-async function startServer() {
-  logger.info('Initializing database...');
-  const dbPool = await DBService.init();
-
-  if (!dbPool) {
-    logger.error('CRITICAL ERROR: Database initialization failed.');
-    process.exit(1);
-  }
-  logger.info('Database connected');
-
-  const configOk = await ConfigService.init(dbPool);
-  const authOk = await AuthService.init(dbPool);
-
-  if (!configOk || !authOk) {
-    logger.error('CRITICAL ERROR: Config or Auth service initialization failed.');
-    process.exit(1);
-  }
-  
-  logger.info('Config service ready');
-  logger.info('Auth service ready');
-
-  // ---- Global Error Handler ----
-  app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
-    logger.error(`Unhandled error in route ${req.method} ${req.originalUrl}:`, err);
-    res.status(500).json({ success: false, error: 'Internal Server Error' });
-  });
-
+function startServer() {
   app.listen(PORT, () => {
     logger.info('');
     logger.info('╔══════════════════════════════════════════════╗');
@@ -92,12 +66,46 @@ async function startServer() {
     logger.info(`║   Ping:   http://localhost:${PORT}/ping         ║`);
     logger.info('╚══════════════════════════════════════════════╝');
     logger.info('');
-    logger.info('🎉 All systems operational. Admin panel is ready.');
-    logger.info('');
+    logger.info('⏳ Starting background service initialization...');
   });
+
+  // ---- Global Error Handler ----
+  app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
+    logger.error(`Unhandled error in route ${req.method} ${req.originalUrl}:`, err);
+    res.status(500).json({ success: false, error: 'Internal Server Error' });
+  });
+
+  // Background initialization loop
+  (async function initializeServices() {
+    while (true) {
+      try {
+        logger.info('Attempting database initialization...');
+        const dbPool = await DBService.init();
+
+        if (dbPool) {
+          logger.info('✅ Database connected successfully');
+          const configOk = await ConfigService.init(dbPool);
+          const authOk = await AuthService.init(dbPool);
+
+          if (configOk && authOk) {
+            logger.info('✅ Config service ready');
+            logger.info('✅ Auth service ready');
+            logger.info('🎉 All systems operational. Admin panel is ready.');
+            break; // Exit retry loop
+          } else {
+            logger.error('⚠️ Config or Auth init failed. Retrying in 5s...');
+          }
+        } else {
+          logger.error('⚠️ Database connection failed. Retrying in 5s...');
+        }
+      } catch (err) {
+        logger.error('⚠️ Unexpected error during initialization. Retrying in 5s...', err);
+      }
+      
+      // Wait 5 seconds before retrying
+      await new Promise(resolve => setTimeout(resolve, 5000));
+    }
+  })();
 }
 
-startServer().catch(err => {
-  logger.error('Fatal startup error:', err);
-  process.exit(1);
-});
+startServer();

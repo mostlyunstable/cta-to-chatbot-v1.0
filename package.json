@@ -15,6 +15,12 @@
   "type": "commonjs",
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
+    "@types/bcryptjs": "^2.4.6",
+    "@types/cookie-parser": "^1.4.10",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^26.1.0",
     "axios": "^1.18.1",
     "bcryptjs": "^3.0.3",
     "cookie-parser": "^1.4.7",
@@ -25,18 +31,12 @@
     "helmet": "^8.2.0",
     "jsonwebtoken": "^9.0.3",
     "mysql2": "^3.22.5",
+    "ts-node": "^10.9.2",
+    "typescript": "^6.0.3",
     "winston": "^3.19.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@types/bcryptjs": "^2.4.6",
-    "@types/cookie-parser": "^1.4.10",
-    "@types/cors": "^2.8.19",
-    "@types/express": "^5.0.6",
-    "@types/jsonwebtoken": "^9.0.10",
-    "@types/node": "^26.1.0",
-    "nodemon": "^3.1.14",
-    "ts-node": "^10.9.2",
-    "typescript": "^6.0.3"
+    "nodemon": "^3.1.14"
   }
 }

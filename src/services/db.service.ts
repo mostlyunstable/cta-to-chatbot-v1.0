@@ -16,16 +16,20 @@ export class DBService {
   static async init(): Promise<mysql.Pool | null> {
     let conn: mysql.PoolConnection | undefined;
     try {
-      pool = mysql.createPool({
-        host: process.env.DB_HOST || 'localhost',
-        user: process.env.DB_USER || 'root',
-        password: process.env.DB_PASSWORD || '',
-        database: process.env.DB_NAME || 'chatbot_db',
-        waitForConnections: true,
-        connectionLimit: 5,
-        queueLimit: 0,
-        connectTimeout: 10000,
-      });
+      if (!pool) {
+        pool = mysql.createPool({
+          host: process.env.DB_HOST || 'localhost',
+          port: parseInt(process.env.DB_PORT || '3306'),
+          user: process.env.DB_USER || 'root',
+          password: process.env.DB_PASSWORD || '',
+          database: process.env.DB_NAME || 'chatbot_db',
+          ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
+          waitForConnections: true,
+          connectionLimit: 5,
+          queueLimit: 0,
+          connectTimeout: 10000,
+        });
+      }
 
       // Test the connection
       conn = await pool.getConnection();
