@@ -188,10 +188,9 @@ router.post('/contact-form', contactLimiter, async (req: Request, res: Response)
   res.status(200).json({ success: true, message: 'Automation triggered' });
 
   try {
-    const fixedMsg = "Thank you for contacting us! We have received your inquiry. Our team will get back to you shortly.";
-    logger.info(`Sending fixed message to ${normalizedPhone}...`);
-    const sent = await MetaService.sendWhatsAppMessage(normalizedPhone, fixedMsg);
-    logger.info(`Fixed message ${sent ? 'SENT' : 'FAILED'}`);
+    logger.info(`Sending contact form template to ${normalizedPhone}...`);
+    const sent = await MetaService.sendWhatsAppTemplate(normalizedPhone, 'contact_form_confirmation', name || 'Customer');
+    logger.info(`Template message ${sent ? 'SENT' : 'FAILED'}`);
   } catch (error: any) {
     logger.error(`Error processing contact form: ${error.message}`);
   }

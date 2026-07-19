@@ -4,11 +4,38 @@ import { DBService } from './db.service';
 import { ConfigService } from './config.service';
 
 export class AIService {
+  private static userQueues = new Map<string, Promise<any>>();
+
   /**
    * Generate an AI reply for a WhatsApp user message.
-   * Reads API key and system prompt from ConfigService (live-updatable from admin panel).
+   * Serializes requests per user to prevent race conditions.
    */
   static async generateReply(userId: string, userMessage: string): Promise<string> {
+    const currentQueue = this.userQueues.get(userId) || Promise.resolve();
+
+    const nextTask = currentQueue.then(() => {
+      return this._generateReplyInternal(userId, userMessage);
+    }).catch(error => {
+      logger.error('❌ AI Queue error:', error?.message || String(error));
+      return 'Thanks for your message! Our team will get back to you shortly.';
+    });
+
+    this.userQueues.set(userId, nextTask);
+
+    nextTask.finally(() => {
+      if (this.userQueues.get(userId) === nextTask) {
+        this.userQueues.delete(userId);
+      }
+    });
+
+    return nextTask;
+  }
+
+  /**
+   * Internal method to process the AI generation logic.
+   * Reads API key and system prompt from ConfigService (live-updatable from admin panel).
+   */
+  private static async _generateReplyInternal(userId: string, userMessage: string): Promise<string> {
     const apiKey = await ConfigService.get('GEMINI_API_KEY');
 
     if (!apiKey || apiKey === 'your_gemini_api_key') {
